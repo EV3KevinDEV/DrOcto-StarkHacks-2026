@@ -1,0 +1,5 @@
+# Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+
+# Minimal pass-through init package for local stacks.
+# The Ryzers builder always prepends `ryzer_env`.

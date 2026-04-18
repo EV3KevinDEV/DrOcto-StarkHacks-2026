@@ -1,0 +1,17 @@
+Metadata-Version: 2.4
+Name: doc-ock
+Version: 0.1.0
+Summary: Doc Ock runtime layer for Ryzers + LeRobot
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi<1,>=0.115
+Requires-Dist: uvicorn<1,>=0.30
+Requires-Dist: pydantic<3,>=2.7
+Requires-Dist: numpy<3,>=1.26
+Provides-Extra: dev
+Requires-Dist: pytest<9,>=8.3; extra == "dev"
+Requires-Dist: httpx<1,>=0.27; extra == "dev"
+
+# Doc Ock App Layer
+
+Runtime package for Doc Ock MVP on top of a LeRobot-based container.
