@@ -4,8 +4,11 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-WORKDIR /ryzers
-COPY test.sh /ryzers/test_ryzer_env.sh
-RUN chmod +x /ryzers/test_ryzer_env.sh
+ARG LEROBOT_HOME=/lerobot
+ENV LEROBOT_HOME=${LEROBOT_HOME}
 
-CMD /ryzers/test_ryzer_env.sh
+WORKDIR ${LEROBOT_HOME}
+COPY test.sh ${LEROBOT_HOME}/test_ryzer_env.sh
+RUN chmod +x ${LEROBOT_HOME}/test_ryzer_env.sh
+
+CMD "${LEROBOT_HOME}/test_ryzer_env.sh"

@@ -10,7 +10,7 @@
 <header>
   <div class="title">
     <h1>Doc Ock</h1>
-    <span class="subtitle">Ryzers + LeRobot &middot; SmolVLA</span>
+    <span class="subtitle">LeRobot &middot; Policy Runtime</span>
   </div>
   <div class="status-pill" id="statusPill">
     <span class="dot" id="statusDot"></span>
@@ -29,6 +29,8 @@
       <div><label>Dry run</label><span id="healthDry">-</span></div>
       <div><label>Model loaded</label><span id="healthModel">-</span></div>
       <div><label>Voice mode</label><span id="healthVoice">-</span></div>
+      <div><label>Robot</label><span id="healthRobot">-</span></div>
+      <div><label>Teleop</label><span id="healthTeleop">-</span></div>
       <div class="full"><label>Configured cameras</label><pre id="healthCams">-</pre></div>
     </div>
   </section>
@@ -36,7 +38,10 @@
   <section class="card">
     <div class="card-header">
       <h2>Voice mode</h2>
-      <kbd>press v</kbd>
+      <div class="row">
+        <kbd>press v</kbd>
+        <kbd>Enter = voice-&gt;action</kbd>
+      </div>
     </div>
     <p class="muted">Process-wide state. Toggling does not pause the running session. When audio is enabled, toggling starts/stops the mic.</p>
     <div class="row">
@@ -46,12 +51,19 @@
       </label>
       <span id="voiceLabel" class="voice-label">OFF</span>
     </div>
+    <div class="buttons">
+      <button type="button" class="btn btn-primary" id="voiceActionBtn">Voice -&gt; Action</button>
+    </div>
+    <p class="muted">Test flow: click once, speak, wait for the transcript to auto-commit.</p>
   </section>
 
   <section class="card" id="transcriptCard">
     <div class="card-header">
       <h2>Transcript</h2>
-      <div class="pill" id="audioPill">audio off</div>
+      <div class="row">
+        <button type="button" class="btn-ghost" id="commitTranscriptBtn">commit</button>
+        <div class="pill" id="audioPill">audio off</div>
+      </div>
     </div>
     <div class="grid2">
       <div class="full">
@@ -78,11 +90,11 @@
     <form id="sessionForm" class="form">
       <div class="form-row">
         <label for="task">Task</label>
-        <input type="text" id="task" placeholder="pick the green block" required />
+        <input type="text" id="task" value="grab the arduino box and move it" placeholder="grab the arduino box and move it" required />
       </div>
       <div class="form-row">
-        <label for="modelRepoId">Model repo ID</label>
-        <input type="text" id="modelRepoId" placeholder="org/smolvla-model" required />
+        <label for="modelRepoId">Policy repo ID or path</label>
+        <input type="text" id="modelRepoId" value="/home/aup/outputs/act_so101_test/checkpoints/last/pretrained_model" placeholder="/home/aup/outputs/act_so101_test/checkpoints/last/pretrained_model" required />
       </div>
       <div class="form-grid">
         <div class="form-row">
@@ -91,7 +103,7 @@
         </div>
         <div class="form-row">
           <label for="maxDuration">Max duration (s)</label>
-          <input type="number" id="maxDuration" min="0.1" step="0.1" placeholder="(optional)" />
+          <input type="number" id="maxDuration" min="0.1" step="0.1" value="60" placeholder="60" />
         </div>
       </div>
 

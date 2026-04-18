@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "doc-ock"
 version = "0.1.0"
-description = "Doc Ock runtime layer for Ryzers + LeRobot"
+description = "Doc Ock runtime layer for LeRobot"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

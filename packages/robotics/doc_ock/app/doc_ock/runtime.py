@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 import threading
-from typing import Callable, Iterable, Optional
+from typing import Callable, Optional
 
 import logging
 
@@ -16,7 +16,7 @@ from doc_ock.voice_mode import VoiceModeController
 
 logger = logging.getLogger(__name__)
 
-PolicyFactory = Callable[[str, Iterable[str], bool], SmolVlaPolicyAdapter]
+PolicyFactory = Callable[[str, RuntimeConfig], SmolVlaPolicyAdapter]
 RobotFactory = Callable[[RuntimeConfig], RobotAdapter]
 
 
@@ -51,7 +51,10 @@ class SessionWorker(SessionRunner):
     def preflight(self) -> None:
         self._policy.load()
         self._policy.validate_camera_names(self._runtime_config.cameras.keys())
-        self._bridge = ObservationBridge(self._policy.expected_image_feature_keys)
+        self._bridge = ObservationBridge(
+            self._policy.expected_image_feature_keys,
+            camera_aliases=self._policy.effective_camera_aliases,
+        )
         self._bridge.validate_camera_names(self._runtime_config.cameras.keys())
 
     def run(self, stop_event: threading.Event, on_step: Callable[[], None]) -> None:
@@ -145,8 +148,7 @@ class DocOckRuntime:
         robot = self._robot_factory(self._runtime_config)
         policy = self._policy_factory(
             request.model_repo_id,
-            self._runtime_config.cameras.keys(),
-            self._runtime_config.dry_run,
+            self._runtime_config,
         )
         worker = SessionWorker(
             runtime_config=self._runtime_config,
@@ -176,9 +178,17 @@ class DocOckRuntime:
         return HealthStatus(
             state=status.state,
             voice_mode_enabled=self._voice_mode.get_enabled(),
-            configured_cameras=dict(self._runtime_config.cameras),
+            configured_cameras=self._runtime_config.configured_cameras(),
+            camera_profiles=self._runtime_config.camera_profiles(),
+            camera_aliases=dict(self._runtime_config.camera_aliases),
             dry_run=self._runtime_config.dry_run,
             model_loaded=self._session_manager.model_loaded,
+            robot_type=self._runtime_config.robot_type,
+            robot_id=self._runtime_config.robot_id,
+            robot_port=self._runtime_config.robot_port,
+            teleop_type=self._runtime_config.teleop_type,
+            teleop_port=self._runtime_config.teleop_port,
+            teleop_id=self._runtime_config.teleop_id,
             audio_enabled=self._audio_source is not None,
             audio_running=audio.get("running", False),
             audio_error=audio.get("error"),
@@ -198,6 +208,21 @@ class DocOckRuntime:
         new_value = self._voice_mode.toggle()
         self._apply_voice_mode(new_value)
         return new_value
+
+    def request_audio_commit(self) -> dict:
+        audio = self._audio_source
+        if audio is None:
+            raise RuntimeError("Audio input is not configured")
+
+        request_commit = getattr(audio, "request_manual_commit", None)
+        if not callable(request_commit):
+            raise RuntimeError("Audio source does not support manual commit")
+
+        if not self._voice_mode.get_enabled():
+            raise RuntimeError("Voice mode is off")
+
+        request_commit()
+        return self._audio_status()
 
     def shutdown(self) -> None:
         audio = self._audio_source
@@ -241,14 +266,16 @@ class DocOckRuntime:
 def _default_robot_factory(runtime_config: RuntimeConfig) -> RobotAdapter:
     if runtime_config.dry_run:
         return DryRunRobotAdapter(runtime_config.cameras)
-    return RealRobotAdapter(robot_port=runtime_config.robot_port, camera_paths=runtime_config.cameras)
+    return RealRobotAdapter(runtime_config=runtime_config)
 
 
-def _default_policy_factory(model_repo_id: str, camera_names: Iterable[str], dry_run: bool) -> SmolVlaPolicyAdapter:
+def _default_policy_factory(model_repo_id: str, runtime_config: RuntimeConfig) -> SmolVlaPolicyAdapter:
     return SmolVlaPolicyAdapter(
         model_repo_id=model_repo_id,
-        camera_names=list(camera_names),
-        dry_run=dry_run,
+        camera_names=list(runtime_config.cameras.keys()),
+        dry_run=runtime_config.dry_run,
+        camera_aliases=runtime_config.camera_aliases,
+        robot_type=runtime_config.robot_type,
     )
 
 

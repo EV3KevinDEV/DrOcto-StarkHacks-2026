@@ -1,43 +1,71 @@
 # DrOcto-StarkHacks-2026
 
-This repo is now scaffolded for the AMD `Ryzers` workflow.
+This repo is configured to run Doc Ock from the existing `lerobot` environment on this device.
 
-## Local tooling env
+The earlier `Ryzers` packaging was only kept around for cross-device testing. It is now legacy scaffolding, not the primary runtime path here.
 
-Create and activate a local virtual environment:
+## Local environment
 
-```powershell
-uv venv .venv
-.\.venv\Scripts\Activate.ps1
-uv pip install -r requirements-ryzers.txt
+Activate the existing Conda environment:
+
+```bash
+source ~/miniforge3/etc/profile.d/conda.sh
+conda activate lerobot
 ```
 
-That installs the `ryzers` CLI into `.venv` without forcing the application container
-to install the tooling package.
+If you need to refresh the upstream LeRobot checkout on this machine:
 
-## Ryzers packages in this repo
-
-- `packages/init/ryzer_env/`: required local pass-through base package because the Ryzers builder always prepends `ryzer_env`
-- `packages/robotics/doc_ock/`: Doc Ock runtime package for LeRobot + SmolVLA control
-
-## Build and run
-
-From the repo root, after activating `.venv`:
-
-```powershell
-# Stage 1: build upstream LeRobot image from vendor package sources
-ryzers build lerobot --base_path .\vendor\Ryzers\packages --name lerobot-upstream
-
-# Stage 2: build local Doc Ock package on top of the LeRobot image
-ryzers build doc_ock --base_path . --name doc-ock-ryzers --init_image lerobot-upstream
-
-ryzers run --name doc-ock-ryzers
+```bash
+cd /home/aup/lerobot
+pip install -e ".[smolvla]"
 ```
 
-The local Doc Ock package exposes an HTTP server on port `8080` and supports CLI mode via `python -m doc_ock.cli`.
+Install the Doc Ock app layer from this repo into that same environment:
 
-## Notes
+```bash
+cd /home/aup/DrOcto-StarkHacks-2026
+pip install -e packages/robotics/doc_ock/app
+```
 
-- Upstream `Ryzers` is Linux-first and expects Docker plus Ryzen AI / ROCm host support.
-- The CLI can be installed on Windows, but the actual `build` and `run` flow is best run
-  from WSL or a Linux host that has the required Docker and device support.
+## Run
+
+CLI mode:
+
+```bash
+python -m doc_ock.cli run \
+  --model-repo-id outputs/act_so101_test/checkpoints/last/pretrained_model \
+  --task "grab the arduino box and move it" \
+  --robot-type so101_follower \
+  --robot-port /dev/ttyACM0 \
+  --robot-id follower1 \
+  --teleop-type so101_leader \
+  --teleop-port /dev/ttyACM1 \
+  --teleop-id leader1 \
+  --camera top=/dev/video0 \
+  --camera side=/dev/video2 \
+  --camera-alias camera1=top \
+  --camera-alias camera2=side
+```
+
+HTTP mode:
+
+```bash
+python -m doc_ock.cli serve \
+  --robot-type so101_follower \
+  --robot-port /dev/ttyACM0 \
+  --robot-id follower1 \
+  --teleop-type so101_leader \
+  --teleop-port /dev/ttyACM1 \
+  --teleop-id leader1 \
+  --camera top=/dev/video0 \
+  --camera side=/dev/video2 \
+  --camera-alias camera1=top \
+  --camera-alias camera2=side
+```
+
+The local Doc Ock runtime serves HTTP on port `8080`.
+
+## Repo layout
+
+- `packages/robotics/doc_ock/`: active Doc Ock runtime layer for LeRobot + SmolVLA control
+- `packages/init/ryzer_env/`: legacy builder shim from earlier `Ryzers` testing; not used for the on-device `lerobot` flow

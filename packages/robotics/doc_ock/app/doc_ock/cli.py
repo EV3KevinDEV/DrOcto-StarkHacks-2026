@@ -8,18 +8,53 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Iterable
 
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional dependency at runtime
+    load_dotenv = None
+
 from doc_ock.api import create_app
-from doc_ock.models import RuntimeConfig, SessionRequest
+from doc_ock.models import RuntimeCameraConfig, RuntimeConfig, SessionRequest
 from doc_ock.runtime import DocOckRuntime
 
 
-def parse_camera_mappings(camera_args: Iterable[str]) -> dict[str, str]:
-    cameras: dict[str, str] = {}
+def _load_local_dotenv() -> None:
+    if not callable(load_dotenv):
+        return
+
+    search_roots = [Path.cwd(), *Path(__file__).resolve().parents]
+    seen: set[Path] = set()
+    for root in search_roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        dotenv_path = root / ".env"
+        if dotenv_path.is_file():
+            load_dotenv(dotenv_path=dotenv_path, override=False)
+            return
+
+
+def _parse_camera_source(raw_value: str) -> str | int:
+    value = raw_value.strip()
+    if value.isdigit():
+        return int(value)
+    return value
+
+
+def parse_camera_mappings(
+    camera_args: Iterable[str],
+    width: int,
+    height: int,
+    fps: int,
+    fourcc: str | None,
+) -> dict[str, RuntimeCameraConfig]:
+    cameras: dict[str, RuntimeCameraConfig] = {}
     for item in camera_args:
         if "=" not in item:
-            raise ValueError(f"Invalid --camera value '{item}'. Expected format: name=/dev/videoX")
+            raise ValueError(f"Invalid --camera value '{item}'. Expected format: name=/dev/videoX or name=N")
         name, path = item.split("=", 1)
         name = name.strip()
         path = path.strip()
@@ -29,11 +64,37 @@ def parse_camera_mappings(camera_args: Iterable[str]) -> dict[str, str]:
             raise ValueError(f"Invalid --camera value '{item}'. Camera path is required")
         if name in cameras:
             raise ValueError(f"Duplicate camera name '{name}'")
-        cameras[name] = path
+        cameras[name] = RuntimeCameraConfig(
+            index_or_path=_parse_camera_source(path),
+            width=width,
+            height=height,
+            fps=fps,
+            fourcc=fourcc,
+        )
 
     if not cameras:
         raise ValueError("At least one --camera mapping is required")
     return cameras
+
+
+def parse_camera_aliases(alias_args: Iterable[str]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for item in alias_args:
+        if "=" not in item:
+            raise ValueError(
+                f"Invalid --camera-alias value '{item}'. Expected format: policy_camera=configured_camera"
+            )
+        policy_camera, configured_camera = item.split("=", 1)
+        policy_camera = policy_camera.strip()
+        configured_camera = configured_camera.strip()
+        if not policy_camera:
+            raise ValueError(f"Invalid --camera-alias value '{item}'. Policy camera name is required")
+        if not configured_camera:
+            raise ValueError(f"Invalid --camera-alias value '{item}'. Configured camera name is required")
+        if policy_camera in aliases:
+            raise ValueError(f"Duplicate camera alias for policy camera '{policy_camera}'")
+        aliases[policy_camera] = configured_camera
+    return aliases
 
 
 class InteractiveVoiceController:
@@ -131,11 +192,24 @@ class InteractiveVoiceController:
 
 
 def _create_runtime(args: argparse.Namespace) -> DocOckRuntime:
-    cameras = parse_camera_mappings(args.camera)
+    cameras = parse_camera_mappings(
+        args.camera,
+        width=args.camera_width,
+        height=args.camera_height,
+        fps=args.camera_fps,
+        fourcc=args.camera_fourcc,
+    )
+    camera_aliases = parse_camera_aliases(getattr(args, "camera_alias", []))
     config = RuntimeConfig(
         robot_port=args.robot_port,
         cameras=cameras,
         dry_run=args.dry_run,
+        robot_type=args.robot_type,
+        robot_id=args.robot_id,
+        teleop_type=args.teleop_type,
+        teleop_port=args.teleop_port,
+        teleop_id=args.teleop_id,
+        camera_aliases=camera_aliases,
         http_host=getattr(args, "host", "0.0.0.0"),
         http_port=getattr(args, "port", 8080),
     )
@@ -268,10 +342,25 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Run a single local Doc Ock session")
-    run_parser.add_argument("--model-repo-id", required=True)
+    run_parser.add_argument("--model-repo-id", required=True, help="HF repo ID or local pretrained policy path")
     run_parser.add_argument("--task", required=True)
     run_parser.add_argument("--robot-port", required=True)
-    run_parser.add_argument("--camera", action="append", default=[], help="name=/dev/videoX")
+    run_parser.add_argument("--robot-type", default="so101_follower")
+    run_parser.add_argument("--robot-id", default="follower1")
+    run_parser.add_argument("--teleop-type", default="so101_leader")
+    run_parser.add_argument("--teleop-port", default=None)
+    run_parser.add_argument("--teleop-id", default="leader1")
+    run_parser.add_argument("--camera", action="append", default=[], help="name=/dev/videoX or name=N")
+    run_parser.add_argument(
+        "--camera-alias",
+        action="append",
+        default=[],
+        help="policy_camera=configured_camera (for example: camera1=top)",
+    )
+    run_parser.add_argument("--camera-width", type=int, default=640)
+    run_parser.add_argument("--camera-height", type=int, default=480)
+    run_parser.add_argument("--camera-fps", type=int, default=30)
+    run_parser.add_argument("--camera-fourcc", default="YUYV")
     run_parser.add_argument("--dry-run", action="store_true")
     run_parser.add_argument("--max-steps", type=int, default=None)
     run_parser.add_argument("--max-duration-s", type=float, default=None)
@@ -281,7 +370,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     serve_parser = subparsers.add_parser("serve", help="Run HTTP API server")
     serve_parser.add_argument("--robot-port", required=True)
-    serve_parser.add_argument("--camera", action="append", default=[], help="name=/dev/videoX")
+    serve_parser.add_argument("--robot-type", default="so101_follower")
+    serve_parser.add_argument("--robot-id", default="follower1")
+    serve_parser.add_argument("--teleop-type", default="so101_leader")
+    serve_parser.add_argument("--teleop-port", default=None)
+    serve_parser.add_argument("--teleop-id", default="leader1")
+    serve_parser.add_argument("--camera", action="append", default=[], help="name=/dev/videoX or name=N")
+    serve_parser.add_argument(
+        "--camera-alias",
+        action="append",
+        default=[],
+        help="policy_camera=configured_camera (for example: camera1=top)",
+    )
+    serve_parser.add_argument("--camera-width", type=int, default=640)
+    serve_parser.add_argument("--camera-height", type=int, default=480)
+    serve_parser.add_argument("--camera-fps", type=int, default=30)
+    serve_parser.add_argument("--camera-fourcc", default="YUYV")
     serve_parser.add_argument("--dry-run", action="store_true")
     serve_parser.add_argument("--host", default="0.0.0.0")
     serve_parser.add_argument("--port", type=int, default=8080)
@@ -301,6 +405,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _load_local_dotenv()
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.handler(args)

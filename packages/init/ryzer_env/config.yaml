@@ -1,5 +1,5 @@
 # Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: MIT
 
-# Minimal pass-through init package for local stacks.
-# The Ryzers builder always prepends `ryzer_env`.
+# Legacy pass-through init package kept for older local stack tests.
+# Not used by the primary on-device `lerobot` workflow.

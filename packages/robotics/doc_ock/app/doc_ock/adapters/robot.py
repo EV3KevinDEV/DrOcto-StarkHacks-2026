@@ -3,9 +3,12 @@ from __future__ import annotations
 import importlib
 import inspect
 import logging
+from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 import numpy as np
+
+from doc_ock.models import RuntimeCameraConfig, RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +38,7 @@ class RobotAdapter(Protocol):
 
 
 class DryRunRobotAdapter:
-    def __init__(self, camera_paths: Mapping[str, str], state_keys: list[str] | None = None):
+    def __init__(self, camera_paths: Mapping[str, Any], state_keys: list[str] | None = None):
         self.camera_paths = dict(camera_paths)
         self.state_keys = list(state_keys) if state_keys else list(_DEFAULT_STATE_KEYS)
         self._started = False
@@ -86,10 +89,14 @@ class DryRunRobotAdapter:
 class RealRobotAdapter:
     """Best-effort adapter for SO-101 follower control through LeRobot runtime APIs."""
 
-    def __init__(self, robot_port: str, camera_paths: Mapping[str, str], state_keys: list[str] | None = None):
-        self.robot_port = robot_port
-        self.camera_paths = dict(camera_paths)
-        self.state_keys = list(state_keys) if state_keys else list(_DEFAULT_STATE_KEYS)
+    def __init__(self, runtime_config: RuntimeConfig, state_keys: list[str] | None = None):
+        self._runtime_config = runtime_config
+        self.robot_port = runtime_config.robot_port
+        self.robot_type = runtime_config.robot_type
+        self.robot_id = runtime_config.robot_id
+        self.camera_configs = dict(runtime_config.cameras)
+        self.state_keys = list(state_keys) if state_keys else []
+        self._action_keys = list(state_keys) if state_keys else []
         self._robot: Any = None
         self._captures: dict[str, Any] = {}
         self._last_action: np.ndarray | None = None
@@ -97,7 +104,14 @@ class RealRobotAdapter:
 
     def start(self) -> None:
         self._robot = self._try_create_lerobot_robot()
-        self._captures = self._start_cameras()
+        if self._robot is None:
+            self._captures = self._start_cameras()
+        else:
+            self._captures = {}
+            connect = getattr(self._robot, "connect", None)
+            if callable(connect):
+                connect()
+            self._initialize_feature_keys()
         self._started = True
 
     def stop(self) -> None:
@@ -139,6 +153,21 @@ class RealRobotAdapter:
             logger.warning("Real mode is active but no LeRobot robot handle is available; action will be dropped")
             return
 
+        if self._action_keys:
+            if self._last_action.size != len(self._action_keys):
+                raise RuntimeError(
+                    "Policy action dimension does not match robot action features. "
+                    f"Expected {len(self._action_keys)} values for {self._action_keys}, "
+                    f"got shape {self._last_action.shape}."
+                )
+
+            action_dict = {
+                key: float(self._last_action[idx])
+                for idx, key in enumerate(self._action_keys)
+            }
+            self._robot.send_action(action_dict)
+            return
+
         for method_name in ("send_action", "apply_action", "step"):
             method = getattr(self._robot, method_name, None)
             if not callable(method):
@@ -147,7 +176,6 @@ class RealRobotAdapter:
                 method(self._last_action)
                 return
             except TypeError:
-                # Some APIs use keyword arguments; retry with a generic kwarg.
                 method(action=self._last_action)
                 return
             except Exception as exc:
@@ -163,38 +191,54 @@ class RealRobotAdapter:
             raise RuntimeError("OpenCV is required for real camera capture") from exc
 
         captures: dict[str, Any] = {}
-        for name, path in self.camera_paths.items():
-            capture = cv2.VideoCapture(path)
+        for name, config in self.camera_configs.items():
+            capture = cv2.VideoCapture(self._camera_source(config))
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, config.width)
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, config.height)
+            capture.set(cv2.CAP_PROP_FPS, config.fps)
+            if config.fourcc:
+                capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*config.fourcc))
             captures[name] = capture
         return captures
 
     def _read_images(self) -> dict[str, np.ndarray]:
+        if self._robot is not None:
+            raw = self._robot.get_observation()
+            images: dict[str, np.ndarray] = {}
+            for name, config in self.camera_configs.items():
+                frame = raw.get(name)
+                if frame is None:
+                    frame = self._empty_frame(config)
+                images[name] = np.asarray(frame)
+            return images
+
         images: dict[str, np.ndarray] = {}
         for name, capture in self._captures.items():
             ok, frame = capture.read()
             if not ok or frame is None:
-                frame = np.zeros((240, 320, 3), dtype=np.uint8)
+                frame = self._empty_frame(self.camera_configs[name])
             images[name] = frame
         return images
 
     def _read_state_mapping(self) -> dict[str, float]:
         if self._robot is not None:
-            for method_name in ("get_state", "read_state", "state"):
-                method = getattr(self._robot, method_name, None)
-                if callable(method):
-                    try:
-                        state = method()
-                        if isinstance(state, Mapping):
-                            return {
-                                key: float(state.get(key, 0.0))
-                                for key in self.state_keys
-                            }
-                    except Exception:
-                        logger.exception("Failed to read robot state via %s", method_name)
+            try:
+                raw = self._robot.get_observation()
+                keys = self.state_keys or self._action_keys or self._discover_state_keys(raw)
+                return {
+                    key: float(raw.get(key, 0.0))
+                    for key in keys
+                }
+            except Exception:
+                logger.exception("Failed to read robot state via get_observation")
 
         return {key: 0.0 for key in self.state_keys}
 
     def _try_create_lerobot_robot(self) -> Any:
+        robot = self._try_create_current_lerobot_robot()
+        if robot is not None:
+            return robot
+
         try:
             module = importlib.import_module("lerobot.common.robot_devices.robots.factory")
         except Exception as exc:
@@ -212,22 +256,85 @@ class RealRobotAdapter:
         logger.warning("No known LeRobot factory method found; continuing with camera-only observations")
         return None
 
+    def _try_create_current_lerobot_robot(self) -> Any:
+        try:
+            from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # type: ignore
+            from lerobot.robots import RobotConfig as LeRobotRobotConfig  # type: ignore
+            from lerobot.robots import make_robot_from_config  # type: ignore
+        except Exception as exc:
+            logger.warning("Current LeRobot robot import failed, falling back to legacy APIs: %s", exc)
+            return None
+
+        try:
+            module = importlib.import_module(f"lerobot.robots.{self.robot_type}")
+        except Exception as exc:
+            logger.warning("Unable to import robot module for type '%s': %s", self.robot_type, exc)
+            return None
+
+        config_class = None
+        for value in vars(module).values():
+            if inspect.isclass(value) and issubclass(value, LeRobotRobotConfig) and value is not LeRobotRobotConfig:
+                config_class = value
+                break
+
+        if config_class is None:
+            logger.warning("Unable to locate a LeRobot config class for robot type '%s'", self.robot_type)
+            return None
+
+        camera_cfg = {
+            name: OpenCVCameraConfig(
+                index_or_path=self._camera_source(config),
+                width=config.width,
+                height=config.height,
+                fps=config.fps,
+                fourcc=config.fourcc,
+            )
+            for name, config in self.camera_configs.items()
+        }
+        candidate_kwargs = {
+            "port": self.robot_port,
+            "id": self.robot_id,
+            "cameras": camera_cfg,
+        }
+
+        try:
+            signature = inspect.signature(config_class)
+        except (TypeError, ValueError):
+            signature = None
+
+        kwargs = {}
+        if signature is not None:
+            for name in signature.parameters:
+                if name in candidate_kwargs:
+                    kwargs[name] = candidate_kwargs[name]
+        else:
+            kwargs = dict(candidate_kwargs)
+
+        try:
+            robot = make_robot_from_config(config_class(**kwargs))
+            logger.info("Initialized LeRobot robot using current API for type %s", self.robot_type)
+            return robot
+        except Exception as exc:
+            logger.warning("Current LeRobot robot creation failed: %s", exc)
+            return None
+
     def _invoke_factory(self, func: Any) -> Any:
         camera_cfg = {
             name: {
-                "type": "opencv",
-                "index_or_path": path,
-                "width": 640,
-                "height": 480,
-                "fps": 30,
+                "type": config.type,
+                "index_or_path": self._camera_source(config),
+                "width": config.width,
+                "height": config.height,
+                "fps": config.fps,
+                "fourcc": config.fourcc,
             }
-            for name, path in self.camera_paths.items()
+            for name, config in self.camera_configs.items()
         }
         candidate_kwargs = {
-            "robot_type": "so101_follower",
-            "type": "so101_follower",
+            "robot_type": self.robot_type,
+            "type": self.robot_type,
             "port": self.robot_port,
-            "id": "doc_ock_follower",
+            "id": self.robot_id,
             "cameras": camera_cfg,
         }
 
@@ -250,9 +357,9 @@ class RealRobotAdapter:
             if len(signature.parameters) == 1:
                 only_name = next(iter(signature.parameters.keys()))
                 payload = {
-                    "type": "so101_follower",
+                    "type": self.robot_type,
                     "port": self.robot_port,
-                    "id": "doc_ock_follower",
+                    "id": self.robot_id,
                     "cameras": camera_cfg,
                 }
                 try:
@@ -261,6 +368,40 @@ class RealRobotAdapter:
                     logger.warning("LeRobot single-arg factory call failed: %s", exc)
 
         try:
-            return func("so101_follower", self.robot_port)
+            return func(self.robot_type, self.robot_port)
         except Exception:
             return None
+
+    def _initialize_feature_keys(self) -> None:
+        action_keys = self._discover_action_keys()
+        if action_keys:
+            self._action_keys = action_keys
+        if not self.state_keys:
+            self.state_keys = list(self._action_keys)
+        if not self.state_keys:
+            self.state_keys = list(_DEFAULT_STATE_KEYS)
+
+    def _discover_action_keys(self) -> list[str]:
+        action_features = getattr(self._robot, "action_features", None)
+        if isinstance(action_features, Mapping):
+            return list(action_features.keys())
+        return []
+
+    def _discover_state_keys(self, raw: Mapping[str, Any] | None = None) -> list[str]:
+        if raw is None and self._robot is not None:
+            raw = getattr(self._robot, "observation_features", None)
+        if isinstance(raw, Mapping):
+            return [
+                key for key in raw
+                if key not in self.camera_configs and not isinstance(raw[key], tuple)
+            ]
+        return list(self._action_keys)
+
+    def _camera_source(self, config: RuntimeCameraConfig) -> int | str:
+        source = config.index_or_path
+        if isinstance(source, Path):
+            return str(source)
+        return source
+
+    def _empty_frame(self, config: RuntimeCameraConfig) -> np.ndarray:
+        return np.zeros((config.height, config.width, 3), dtype=np.uint8)

@@ -14,9 +14,32 @@ import asyncio
 import base64
 import logging
 import os
+import numpy as np
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _read_env_float(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return float(raw_value)
+    except ValueError:
+        logger.warning("Invalid float for %s=%r; using default %s", name, raw_value, default)
+        return default
+
+
+def _read_env_int(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        logger.warning("Invalid int for %s=%r; using default %s", name, raw_value, default)
+        return default
 
 
 class ElevenLabsRealtimeTranscriber:
@@ -61,6 +84,13 @@ class ElevenLabsRealtimeTranscriber:
         self._audio_stream: Any = None
         self._tasks: list[asyncio.Task] = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._noise_gate_rms_threshold = _read_env_float("DOC_OCK_AUDIO_RMS_THRESHOLD", 550.0)
+        self._noise_gate_hangover_chunks = _read_env_int("DOC_OCK_AUDIO_HANGOVER_CHUNKS", 3)
+        self._noise_gate_open_chunks_remaining = 0
+        self._vad_silence_threshold_secs = _read_env_float("DOC_OCK_VAD_SILENCE_THRESHOLD_SECS", 0.8)
+        self._vad_threshold = _read_env_float("DOC_OCK_VAD_THRESHOLD", 0.7)
+        self._min_speech_duration_ms = _read_env_int("DOC_OCK_MIN_SPEECH_DURATION_MS", 250)
+        self._min_silence_duration_ms = _read_env_int("DOC_OCK_MIN_SILENCE_DURATION_MS", 250)
 
     async def start(self) -> None:
         from elevenlabs import (
@@ -86,10 +116,10 @@ class ElevenLabsRealtimeTranscriber:
                 sample_rate=self.sample_rate,
                 commit_strategy=strategy,
                 include_timestamps=self.include_timestamps,
-                vad_silence_threshold_secs=1.5,
-                vad_threshold=0.4,
-                min_speech_duration_ms=100,
-                min_silence_duration_ms=100,
+                vad_silence_threshold_secs=self._vad_silence_threshold_secs,
+                vad_threshold=self._vad_threshold,
+                min_speech_duration_ms=self._min_speech_duration_ms,
+                min_silence_duration_ms=self._min_silence_duration_ms,
             )
         )
 
@@ -197,7 +227,7 @@ class ElevenLabsRealtimeTranscriber:
         def audio_callback(indata, frames, time_info, status):
             if status:
                 logger.debug("[audio status] %s", status)
-            chunk = bytes(indata)
+            chunk = self._gate_audio_chunk(bytes(indata))
             try:
                 loop.call_soon_threadsafe(self.audio_queue.put_nowait, chunk)
             except RuntimeError:
@@ -216,11 +246,37 @@ class ElevenLabsRealtimeTranscriber:
         self._audio_stream = sd.InputStream(**stream_kwargs)
         self._audio_stream.start()
         logger.info(
-            "Mic stream started (device=%s sample_rate=%d block_ms=%d)",
+            "Mic stream started (device=%s sample_rate=%d block_ms=%d rms_threshold=%s vad_threshold=%s)",
             self.input_device if self.input_device is not None else "<default>",
             self.sample_rate,
             self.block_ms,
+            self._noise_gate_rms_threshold,
+            self._vad_threshold,
         )
+
+    def _gate_audio_chunk(self, chunk: bytes) -> bytes:
+        if not chunk:
+            return chunk
+
+        pcm = np.frombuffer(chunk, dtype=np.int16)
+        if pcm.size == 0:
+            return chunk
+
+        rms = self._chunk_rms(pcm)
+        if rms >= self._noise_gate_rms_threshold:
+            self._noise_gate_open_chunks_remaining = self._noise_gate_hangover_chunks
+            return chunk
+
+        if self._noise_gate_open_chunks_remaining > 0:
+            self._noise_gate_open_chunks_remaining -= 1
+            return chunk
+
+        return bytes(len(chunk))
+
+    @staticmethod
+    def _chunk_rms(pcm: np.ndarray) -> float:
+        float_pcm = pcm.astype(np.float32)
+        return float(np.sqrt(np.mean(np.square(float_pcm))))
 
     async def _stream_mic_audio(self) -> None:
         try:

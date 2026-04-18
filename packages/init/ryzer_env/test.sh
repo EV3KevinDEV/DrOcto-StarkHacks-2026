@@ -6,4 +6,4 @@
 set -euo pipefail
 
 python3 --version
-echo "ryzer_env pass-through layer OK"
+echo "legacy ryzer_env pass-through layer OK"

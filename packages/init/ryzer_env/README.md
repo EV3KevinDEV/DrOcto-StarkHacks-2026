@@ -1,12 +1,5 @@
-# Local ryzer_env
+# Legacy ryzer_env
 
-This package is a minimal local pass-through `ryzer_env` layer.
+This package is a minimal pass-through `ryzer_env` layer kept only for older `Ryzers` build tests on other devices.
 
-Ryzers prepends `ryzer_env` automatically during builds, so this package exists only to satisfy local package resolution when building from this repository root.
-
-## Build and run
-
-```bash
-ryzers build doc_ock --base_path . --init_image <upstream-lerobot-image>
-ryzers run --name doc-ock-ryzers
-```
+It is not part of the primary runtime flow on this machine. The active setup here is the existing `lerobot` environment plus the editable `doc_ock` install from this repo.

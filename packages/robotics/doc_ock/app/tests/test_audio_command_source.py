@@ -25,6 +25,7 @@ class FakeAudioSource:
         self.latest_error: Optional[str] = None
         self.start_calls = 0
         self.stop_calls = 0
+        self.manual_commit_calls = 0
 
     @property
     def is_running(self) -> bool:
@@ -56,6 +57,10 @@ class FakeAudioSource:
             self.latest_partial = ""
             self.latest_committed = text
             self._queue.append(TaskCommand(task_text=text))
+
+    def request_manual_commit(self) -> None:
+        with self._lock:
+            self.manual_commit_calls += 1
 
 
 @pytest.fixture
@@ -154,4 +159,17 @@ def test_session_reaches_stopped_state(audio_runtime_config: RuntimeConfig) -> N
     status = runtime.start_session(request=request, background=False)
     assert status.state == SessionState.STOPPED
     assert status.step_count == 5
+    runtime.shutdown()
+
+
+def test_manual_audio_commit_is_forwarded_to_audio_source(audio_runtime_config: RuntimeConfig) -> None:
+    audio = FakeAudioSource()
+    runtime = DocOckRuntime(audio_runtime_config, audio_source=audio)
+
+    runtime.set_voice_mode(True)
+    payload = runtime.request_audio_commit()
+
+    assert audio.manual_commit_calls == 1
+    assert payload["running"] is True
+
     runtime.shutdown()

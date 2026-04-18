@@ -7,6 +7,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from doc_ock.interop import translate_lerobot_record_command, validate_translation_against_runtime
 from doc_ock.models import SessionRequest
 from doc_ock.runtime import DocOckRuntime, SessionConflictError
 
@@ -23,6 +24,10 @@ class SessionStartBody(BaseModel):
 
 class VoiceModeBody(BaseModel):
     enabled: bool
+
+
+class LerobotRecordBody(BaseModel):
+    command: str = Field(min_length=1)
 
 
 def create_app(runtime: DocOckRuntime) -> FastAPI:
@@ -62,6 +67,24 @@ def create_app(runtime: DocOckRuntime) -> FastAPI:
         status = runtime.stop_session()
         return status.to_dict()
 
+    @app.post("/session/start-from-lerobot-record")
+    def start_session_from_lerobot_record(body: LerobotRecordBody) -> dict:
+        try:
+            translation = translate_lerobot_record_command(body.command)
+            validate_translation_against_runtime(translation, runtime.runtime_config)
+            request = SessionRequest(**translation.session_start_body())
+            status = runtime.start_session(request=request, background=True)
+        except SessionConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        payload = status.to_dict()
+        payload["lerobot_translation"] = translation.to_dict()
+        return payload
+
     @app.get("/session/status")
     def session_status() -> dict:
         return runtime.get_session_status().to_dict()
@@ -76,6 +99,26 @@ def create_app(runtime: DocOckRuntime) -> FastAPI:
         status = runtime.get_session_status()
         payload = {"enabled": enabled}
         payload.update({"voice_mode_enabled": status.voice_mode_enabled, "state": status.state.value})
+        return payload
+
+    @app.post("/audio/commit")
+    def commit_audio() -> dict:
+        try:
+            audio = runtime.request_audio_commit()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        payload = {"ok": True}
+        payload.update(
+            {
+                "audio_running": audio.get("running", False),
+                "latest_partial_transcript": audio.get("latest_partial", ""),
+                "latest_committed_transcript": audio.get("latest_committed"),
+                "audio_error": audio.get("error"),
+            }
+        )
         return payload
 
     @app.get("/health")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -17,14 +18,24 @@ def feature_key_to_camera_name(feature_key: str) -> str:
     raise ValueError(f"Unsupported image feature key: {feature_key}")
 
 
+def is_placeholder_camera_name(camera_name: str) -> bool:
+    return re.fullmatch(r"camera\d+", camera_name) is not None
+
+
 class ObservationBridge:
     """Bridge from robot observations to policy-ready observation dicts."""
 
-    def __init__(self, expected_image_feature_keys: Sequence[str], state_keys: Sequence[str] | None = None):
+    def __init__(
+        self,
+        expected_image_feature_keys: Sequence[str],
+        state_keys: Sequence[str] | None = None,
+        camera_aliases: Mapping[str, str] | None = None,
+    ):
         if not expected_image_feature_keys:
             raise ValueError("expected_image_feature_keys must not be empty")
         self._expected_image_feature_keys = list(expected_image_feature_keys)
         self._state_keys = list(state_keys) if state_keys else None
+        self._camera_aliases = dict(camera_aliases or {})
 
     @property
     def expected_image_feature_keys(self) -> list[str]:
@@ -34,13 +45,24 @@ class ObservationBridge:
         return [feature_key_to_camera_name(k) for k in self._expected_image_feature_keys]
 
     def validate_camera_names(self, configured_camera_names: Iterable[str]) -> None:
-        expected = sorted(self.expected_camera_names())
+        expected = self.expected_camera_names()
         configured = sorted(list(configured_camera_names))
-        if expected != configured:
+        missing_required: list[str] = []
+
+        for camera_name in expected:
+            resolved_name = self._camera_aliases.get(camera_name, camera_name)
+            if resolved_name in configured:
+                continue
+            if camera_name in self._camera_aliases or not is_placeholder_camera_name(camera_name):
+                missing_required.append(camera_name)
+
+        if missing_required:
             raise CameraValidationError(
                 "Camera feature mismatch. "
-                f"Expected camera names from policy features: {expected}. "
-                f"Configured camera names: {configured}."
+                f"Expected camera names from policy features: {sorted(expected)}. "
+                f"Configured camera names: {configured}. "
+                f"Camera aliases: {self._camera_aliases}. "
+                f"Missing required policy cameras: {sorted(missing_required)}."
             )
 
     def to_policy_observation(self, observation: Mapping[str, Any], task_text: str) -> dict[str, Any]:
@@ -64,9 +86,15 @@ class ObservationBridge:
                 raise ValueError("Policy expects a single 'observation.image', but multiple cameras were provided")
             return next(iter(images.values()))
 
-        if camera_name not in images:
+        resolved_camera_name = self._camera_aliases.get(camera_name, camera_name)
+        if resolved_camera_name not in images:
+            if is_placeholder_camera_name(camera_name) and camera_name not in self._camera_aliases:
+                sample = next(iter(images.values()), None)
+                if sample is None:
+                    raise ValueError("Robot observation includes no images to synthesize a placeholder camera")
+                return np.zeros_like(np.asarray(sample))
             raise ValueError(f"Missing image for camera name: {camera_name}")
-        return images[camera_name]
+        return images[resolved_camera_name]
 
     def _to_chw_float(self, image: Any) -> np.ndarray:
         arr = np.asarray(image)
