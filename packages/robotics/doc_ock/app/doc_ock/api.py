@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from doc_ock.models import SessionRequest
 from doc_ock.runtime import DocOckRuntime, SessionConflictError
+
+_UI_DIR = Path(__file__).parent / "ui"
 
 
 class SessionStartBody(BaseModel):
@@ -75,5 +81,12 @@ def create_app(runtime: DocOckRuntime) -> FastAPI:
     @app.get("/health")
     def health() -> dict:
         return runtime.get_health_status().to_dict()
+
+    if _UI_DIR.is_dir():
+        app.mount("/ui", StaticFiles(directory=str(_UI_DIR), html=True), name="ui")
+
+        @app.get("/", include_in_schema=False)
+        def _root_redirect() -> RedirectResponse:
+            return RedirectResponse(url="/ui/")
 
     return app

@@ -16,6 +16,10 @@ class SessionRunner(Protocol):
     def model_loaded(self) -> bool:
         ...
 
+    @property
+    def active_task(self) -> Optional[str]:
+        ...
+
     def run(self, stop_event: threading.Event, on_step: Callable[[], None]) -> None:
         ...
 
@@ -23,10 +27,19 @@ class SessionRunner(Protocol):
         ...
 
 
+AudioStatusProvider = Callable[[], dict]
+
+
 class SessionManager:
-    def __init__(self, voice_mode_controller: VoiceModeController, dry_run: bool):
+    def __init__(
+        self,
+        voice_mode_controller: VoiceModeController,
+        dry_run: bool,
+        audio_status_provider: Optional[AudioStatusProvider] = None,
+    ):
         self._voice_mode_controller = voice_mode_controller
         self._dry_run = dry_run
+        self._audio_status_provider = audio_status_provider
 
         self._lock = threading.RLock()
         self._state: SessionState = SessionState.IDLE
@@ -141,13 +154,26 @@ class SessionManager:
             self._step_count += 1
 
     def _status_locked(self) -> SessionStatus:
+        audio = self._audio_status_provider() if self._audio_status_provider else {}
+        active_task = self._task
+        if self._runner is not None:
+            try:
+                runner_task = getattr(self._runner, "active_task", None)
+                if runner_task:
+                    active_task = runner_task
+            except Exception:
+                pass
         return SessionStatus(
             state=self._state,
-            task=self._task,
+            task=active_task,
             model_repo_id=self._model_repo_id,
             step_count=self._step_count,
             started_at=self._started_at,
             last_error=self._last_error,
             voice_mode_enabled=self._voice_mode_controller.get_enabled(),
             dry_run=self._dry_run,
+            latest_partial_transcript=audio.get("latest_partial", ""),
+            latest_committed_transcript=audio.get("latest_committed"),
+            audio_running=audio.get("running", False),
+            audio_error=audio.get("error"),
         )

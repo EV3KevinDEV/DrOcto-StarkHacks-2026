@@ -139,11 +139,48 @@ def _create_runtime(args: argparse.Namespace) -> DocOckRuntime:
         http_host=getattr(args, "host", "0.0.0.0"),
         http_port=getattr(args, "port", 8080),
     )
-    return DocOckRuntime(runtime_config=config)
+
+    audio_source = None
+    if getattr(args, "enable_audio", False):
+        try:
+            from doc_ock.audio.elevenlabs_command_source import (
+                AudioConfig,
+                ElevenLabsCommandSource,
+            )
+        except Exception as exc:  # pragma: no cover - optional deps
+            print(
+                f"--enable-audio requested but audio deps are missing: {exc}\n"
+                "Install with: pip install 'doc-ock[audio]'",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+
+        device: str | int | None = getattr(args, "audio_device", None)
+        if device is not None:
+            try:
+                device = int(device)
+            except (TypeError, ValueError):
+                pass
+
+        audio_source = ElevenLabsCommandSource(
+            config=AudioConfig(
+                enabled=True,
+                device=device,
+                commit_strategy=getattr(args, "audio_commit_strategy", "vad"),
+            ),
+            on_partial=lambda text: print(f"[partial] {text}"),
+            on_commit=lambda text: print(f"[committed] {text}"),
+        )
+
+    return DocOckRuntime(runtime_config=config, audio_source=audio_source)
 
 
 def _run_command(args: argparse.Namespace) -> int:
-    runtime = _create_runtime(args)
+    try:
+        runtime = _create_runtime(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     interactive = InteractiveVoiceController(runtime, enabled=not args.no_interactive)
     interactive.start()
 
@@ -161,13 +198,18 @@ def _run_command(args: argparse.Namespace) -> int:
         return 1
     finally:
         interactive.stop()
+        runtime.shutdown()
 
     print(json.dumps(status.to_dict(), indent=2))
     return 0 if status.state.value != "error" else 1
 
 
 def _serve_command(args: argparse.Namespace) -> int:
-    runtime = _create_runtime(args)
+    try:
+        runtime = _create_runtime(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     app = create_app(runtime)
     interactive = InteractiveVoiceController(runtime, enabled=not args.no_interactive)
     interactive.start()
@@ -184,6 +226,7 @@ def _serve_command(args: argparse.Namespace) -> int:
         return 1
     finally:
         interactive.stop()
+        runtime.shutdown()
 
 
 def _health_command(args: argparse.Namespace) -> int:
@@ -200,6 +243,26 @@ def _health_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _add_audio_args(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument(
+        "--enable-audio",
+        action="store_true",
+        help="Enable ElevenLabs realtime mic transcription as a CommandSource "
+        "(requires [audio] extras and ELEVENLABS_API_KEY).",
+    )
+    sub.add_argument(
+        "--audio-device",
+        default=None,
+        help="Input device name or index for sounddevice (default: system default).",
+    )
+    sub.add_argument(
+        "--audio-commit-strategy",
+        choices=["vad", "manual", "auto"],
+        default="vad",
+        help="ElevenLabs realtime commit strategy (default: vad).",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Doc Ock runtime CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -213,6 +276,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--max-steps", type=int, default=None)
     run_parser.add_argument("--max-duration-s", type=float, default=None)
     run_parser.add_argument("--no-interactive", action="store_true", help=argparse.SUPPRESS)
+    _add_audio_args(run_parser)
     run_parser.set_defaults(handler=_run_command)
 
     serve_parser = subparsers.add_parser("serve", help="Run HTTP API server")
@@ -223,6 +287,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--port", type=int, default=8080)
     serve_parser.add_argument("--log-level", default="info")
     serve_parser.add_argument("--no-interactive", action="store_true", help=argparse.SUPPRESS)
+    _add_audio_args(serve_parser)
     serve_parser.set_defaults(handler=_serve_command)
 
     health_parser = subparsers.add_parser("health", help="Query the Doc Ock health endpoint")

@@ -18,6 +18,9 @@ doc_ock.egg-info/top_level.txt
 doc_ock/adapters/__init__.py
 doc_ock/adapters/policy.py
 doc_ock/adapters/robot.py
+doc_ock/ui/app.js
+doc_ock/ui/index.html
+doc_ock/ui/styles.css
 tests/test_action_chunk_buffering.py
 tests/test_camera_validation.py
 tests/test_cli_smoke_dry_run.py

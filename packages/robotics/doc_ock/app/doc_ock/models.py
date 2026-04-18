@@ -43,6 +43,10 @@ class SessionStatus:
     last_error: Optional[str] = None
     voice_mode_enabled: bool = False
     dry_run: bool = False
+    latest_partial_transcript: str = ""
+    latest_committed_transcript: Optional[str] = None
+    audio_running: bool = False
+    audio_error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -54,6 +58,10 @@ class SessionStatus:
             "last_error": self.last_error,
             "voice_mode_enabled": self.voice_mode_enabled,
             "dry_run": self.dry_run,
+            "latest_partial_transcript": self.latest_partial_transcript,
+            "latest_committed_transcript": self.latest_committed_transcript,
+            "audio_running": self.audio_running,
+            "audio_error": self.audio_error,
         }
 
 
@@ -64,6 +72,11 @@ class HealthStatus:
     configured_cameras: Dict[str, str]
     dry_run: bool
     model_loaded: bool
+    audio_enabled: bool = False
+    audio_running: bool = False
+    audio_error: Optional[str] = None
+    latest_partial_transcript: str = ""
+    latest_committed_transcript: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -72,6 +85,11 @@ class HealthStatus:
             "configured_cameras": self.configured_cameras,
             "dry_run": self.dry_run,
             "model_loaded": self.model_loaded,
+            "audio_enabled": self.audio_enabled,
+            "audio_running": self.audio_running,
+            "audio_error": self.audio_error,
+            "latest_partial_transcript": self.latest_partial_transcript,
+            "latest_committed_transcript": self.latest_committed_transcript,
         }
 
 
