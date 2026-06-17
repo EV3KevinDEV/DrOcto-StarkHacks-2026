@@ -1,0 +1,5 @@
+# Copyright(C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+
+# Legacy pass-through init package kept for older local stack tests.
+# Not used by the primary on-device `lerobot` workflow.

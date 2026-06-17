@@ -1,0 +1,13 @@
+fastapi<1,>=0.115
+uvicorn<1,>=0.30
+pydantic<3,>=2.7
+numpy<3,>=1.26
+
+[audio]
+elevenlabs<2,>=1.0
+sounddevice<1,>=0.4
+python-dotenv<2,>=1.0
+
+[dev]
+pytest<9,>=8.3
+httpx<1,>=0.27

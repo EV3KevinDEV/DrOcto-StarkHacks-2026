@@ -1,0 +1,415 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Iterable
+
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover - optional dependency at runtime
+    load_dotenv = None
+
+from doc_ock.api import create_app
+from doc_ock.models import RuntimeCameraConfig, RuntimeConfig, SessionRequest
+from doc_ock.runtime import DocOckRuntime
+
+
+def _load_local_dotenv() -> None:
+    if not callable(load_dotenv):
+        return
+
+    search_roots = [Path.cwd(), *Path(__file__).resolve().parents]
+    seen: set[Path] = set()
+    for root in search_roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        dotenv_path = root / ".env"
+        if dotenv_path.is_file():
+            load_dotenv(dotenv_path=dotenv_path, override=False)
+            return
+
+
+def _parse_camera_source(raw_value: str) -> str | int:
+    value = raw_value.strip()
+    if value.isdigit():
+        return int(value)
+    return value
+
+
+def parse_camera_mappings(
+    camera_args: Iterable[str],
+    width: int,
+    height: int,
+    fps: int,
+    fourcc: str | None,
+) -> dict[str, RuntimeCameraConfig]:
+    cameras: dict[str, RuntimeCameraConfig] = {}
+    for item in camera_args:
+        if "=" not in item:
+            raise ValueError(f"Invalid --camera value '{item}'. Expected format: name=/dev/videoX or name=N")
+        name, path = item.split("=", 1)
+        name = name.strip()
+        path = path.strip()
+        if not name:
+            raise ValueError(f"Invalid --camera value '{item}'. Camera name is required")
+        if not path:
+            raise ValueError(f"Invalid --camera value '{item}'. Camera path is required")
+        if name in cameras:
+            raise ValueError(f"Duplicate camera name '{name}'")
+        cameras[name] = RuntimeCameraConfig(
+            index_or_path=_parse_camera_source(path),
+            width=width,
+            height=height,
+            fps=fps,
+            fourcc=fourcc,
+        )
+
+    if not cameras:
+        raise ValueError("At least one --camera mapping is required")
+    return cameras
+
+
+def parse_camera_aliases(alias_args: Iterable[str]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for item in alias_args:
+        if "=" not in item:
+            raise ValueError(
+                f"Invalid --camera-alias value '{item}'. Expected format: policy_camera=configured_camera"
+            )
+        policy_camera, configured_camera = item.split("=", 1)
+        policy_camera = policy_camera.strip()
+        configured_camera = configured_camera.strip()
+        if not policy_camera:
+            raise ValueError(f"Invalid --camera-alias value '{item}'. Policy camera name is required")
+        if not configured_camera:
+            raise ValueError(f"Invalid --camera-alias value '{item}'. Configured camera name is required")
+        if policy_camera in aliases:
+            raise ValueError(f"Duplicate camera alias for policy camera '{policy_camera}'")
+        aliases[policy_camera] = configured_camera
+    return aliases
+
+
+class InteractiveVoiceController:
+    def __init__(self, runtime: DocOckRuntime, enabled: bool):
+        self._runtime = runtime
+        self._enabled = enabled
+        self._stop_event = threading.Event()
+        self._hotkey_thread: threading.Thread | None = None
+        self._text_thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if not self._enabled:
+            return
+
+        initial = "ON" if self._runtime.get_voice_mode() else "OFF"
+        print(f"Voice mode is {initial}. Press 'v' to toggle.")
+
+        started = self._start_hotkey_listener()
+        if started:
+            return
+
+        print(
+            "Hotkey capture unavailable. "
+            "Type 'v' then Enter to toggle voice mode while the CLI is running.",
+            file=sys.stderr,
+        )
+        self._text_thread = threading.Thread(target=self._text_loop, name="doc-ock-text-toggle", daemon=True)
+        self._text_thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def _start_hotkey_listener(self) -> bool:
+        if not hasattr(sys.stdin, "isatty") or not sys.stdin.isatty():
+            return False
+
+        if os.name == "nt":
+            self._hotkey_thread = threading.Thread(target=self._windows_hotkey_loop, name="doc-ock-hotkey", daemon=True)
+            self._hotkey_thread.start()
+            return True
+
+        self._hotkey_thread = threading.Thread(target=self._posix_hotkey_loop, name="doc-ock-hotkey", daemon=True)
+        self._hotkey_thread.start()
+        return True
+
+    def _toggle_voice_mode(self) -> None:
+        enabled = self._runtime.toggle_voice_mode()
+        print(f"Voice mode is now {'ON' if enabled else 'OFF'}")
+
+    def _windows_hotkey_loop(self) -> None:
+        try:
+            import msvcrt  # type: ignore
+        except Exception:
+            return
+
+        while not self._stop_event.is_set():
+            if msvcrt.kbhit():
+                char = msvcrt.getwch().lower()
+                if char == "v":
+                    self._toggle_voice_mode()
+            time.sleep(0.05)
+
+    def _posix_hotkey_loop(self) -> None:
+        try:
+            import select
+            import termios
+            import tty
+        except Exception:
+            return
+
+        if not sys.stdin.isatty():
+            return
+
+        file_descriptor = sys.stdin.fileno()
+        original_attrs = termios.tcgetattr(file_descriptor)
+        tty.setcbreak(file_descriptor)
+        try:
+            while not self._stop_event.is_set():
+                ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+                if ready:
+                    char = sys.stdin.read(1).lower()
+                    if char == "v":
+                        self._toggle_voice_mode()
+        finally:
+            termios.tcsetattr(file_descriptor, termios.TCSADRAIN, original_attrs)
+
+    def _text_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                line = input().strip().lower()
+            except EOFError:
+                return
+            if line == "v":
+                self._toggle_voice_mode()
+
+
+def _create_runtime(args: argparse.Namespace) -> DocOckRuntime:
+    cameras = parse_camera_mappings(
+        args.camera,
+        width=args.camera_width,
+        height=args.camera_height,
+        fps=args.camera_fps,
+        fourcc=args.camera_fourcc,
+    )
+    camera_aliases = parse_camera_aliases(getattr(args, "camera_alias", []))
+    config = RuntimeConfig(
+        robot_port=args.robot_port,
+        cameras=cameras,
+        dry_run=args.dry_run,
+        robot_type=args.robot_type,
+        robot_id=args.robot_id,
+        teleop_type=args.teleop_type,
+        teleop_port=args.teleop_port,
+        teleop_id=args.teleop_id,
+        camera_aliases=camera_aliases,
+        http_host=getattr(args, "host", "0.0.0.0"),
+        http_port=getattr(args, "port", 8080),
+    )
+
+    audio_source = None
+    if getattr(args, "enable_audio", False):
+        try:
+            from doc_ock.audio.elevenlabs_command_source import (
+                AudioConfig,
+                ElevenLabsCommandSource,
+            )
+        except Exception as exc:  # pragma: no cover - optional deps
+            print(
+                f"--enable-audio requested but audio deps are missing: {exc}\n"
+                "Install with: pip install 'doc-ock[audio]'",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+
+        device: str | int | None = getattr(args, "audio_device", None)
+        if device is not None:
+            try:
+                device = int(device)
+            except (TypeError, ValueError):
+                pass
+
+        audio_source = ElevenLabsCommandSource(
+            config=AudioConfig(
+                enabled=True,
+                device=device,
+                commit_strategy=getattr(args, "audio_commit_strategy", "vad"),
+            ),
+            on_partial=lambda text: print(f"[partial] {text}"),
+            on_commit=lambda text: print(f"[committed] {text}"),
+        )
+
+    return DocOckRuntime(runtime_config=config, audio_source=audio_source)
+
+
+def _run_command(args: argparse.Namespace) -> int:
+    try:
+        runtime = _create_runtime(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    interactive = InteractiveVoiceController(runtime, enabled=not args.no_interactive)
+    interactive.start()
+
+    request = SessionRequest(
+        task=args.task,
+        model_repo_id=args.model_repo_id,
+        max_steps=args.max_steps,
+        max_duration_s=args.max_duration_s,
+    )
+
+    try:
+        status = runtime.start_session(request=request, background=False)
+    except Exception as exc:
+        print(f"Failed to run session: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        interactive.stop()
+        runtime.shutdown()
+
+    print(json.dumps(status.to_dict(), indent=2))
+    return 0 if status.state.value != "error" else 1
+
+
+def _serve_command(args: argparse.Namespace) -> int:
+    try:
+        runtime = _create_runtime(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    app = create_app(runtime)
+    interactive = InteractiveVoiceController(runtime, enabled=not args.no_interactive)
+    interactive.start()
+
+    try:
+        import uvicorn  # type: ignore
+
+        uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
+        return 0
+    except KeyboardInterrupt:
+        return 0
+    except Exception as exc:
+        print(f"Failed to start server: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        interactive.stop()
+        runtime.shutdown()
+
+
+def _health_command(args: argparse.Namespace) -> int:
+    url = args.url or f"http://{args.host}:{args.port}/health"
+
+    try:
+        with urllib.request.urlopen(url, timeout=args.timeout_s) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        print(f"Health request failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def _add_audio_args(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument(
+        "--enable-audio",
+        action="store_true",
+        help="Enable ElevenLabs realtime mic transcription as a CommandSource "
+        "(requires [audio] extras and ELEVENLABS_API_KEY).",
+    )
+    sub.add_argument(
+        "--audio-device",
+        default=None,
+        help="Input device name or index for sounddevice (default: system default).",
+    )
+    sub.add_argument(
+        "--audio-commit-strategy",
+        choices=["vad", "manual", "auto"],
+        default="vad",
+        help="ElevenLabs realtime commit strategy (default: vad).",
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Doc Ock runtime CLI")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    run_parser = subparsers.add_parser("run", help="Run a single local Doc Ock session")
+    run_parser.add_argument("--model-repo-id", required=True, help="HF repo ID or local pretrained policy path")
+    run_parser.add_argument("--task", required=True)
+    run_parser.add_argument("--robot-port", required=True)
+    run_parser.add_argument("--robot-type", default="so101_follower")
+    run_parser.add_argument("--robot-id", default="follower1")
+    run_parser.add_argument("--teleop-type", default="so101_leader")
+    run_parser.add_argument("--teleop-port", default=None)
+    run_parser.add_argument("--teleop-id", default="leader1")
+    run_parser.add_argument("--camera", action="append", default=[], help="name=/dev/videoX or name=N")
+    run_parser.add_argument(
+        "--camera-alias",
+        action="append",
+        default=[],
+        help="policy_camera=configured_camera (for example: camera1=top)",
+    )
+    run_parser.add_argument("--camera-width", type=int, default=640)
+    run_parser.add_argument("--camera-height", type=int, default=480)
+    run_parser.add_argument("--camera-fps", type=int, default=30)
+    run_parser.add_argument("--camera-fourcc", default="YUYV")
+    run_parser.add_argument("--dry-run", action="store_true")
+    run_parser.add_argument("--max-steps", type=int, default=None)
+    run_parser.add_argument("--max-duration-s", type=float, default=None)
+    run_parser.add_argument("--no-interactive", action="store_true", help=argparse.SUPPRESS)
+    _add_audio_args(run_parser)
+    run_parser.set_defaults(handler=_run_command)
+
+    serve_parser = subparsers.add_parser("serve", help="Run HTTP API server")
+    serve_parser.add_argument("--robot-port", required=True)
+    serve_parser.add_argument("--robot-type", default="so101_follower")
+    serve_parser.add_argument("--robot-id", default="follower1")
+    serve_parser.add_argument("--teleop-type", default="so101_leader")
+    serve_parser.add_argument("--teleop-port", default=None)
+    serve_parser.add_argument("--teleop-id", default="leader1")
+    serve_parser.add_argument("--camera", action="append", default=[], help="name=/dev/videoX or name=N")
+    serve_parser.add_argument(
+        "--camera-alias",
+        action="append",
+        default=[],
+        help="policy_camera=configured_camera (for example: camera1=top)",
+    )
+    serve_parser.add_argument("--camera-width", type=int, default=640)
+    serve_parser.add_argument("--camera-height", type=int, default=480)
+    serve_parser.add_argument("--camera-fps", type=int, default=30)
+    serve_parser.add_argument("--camera-fourcc", default="YUYV")
+    serve_parser.add_argument("--dry-run", action="store_true")
+    serve_parser.add_argument("--host", default="0.0.0.0")
+    serve_parser.add_argument("--port", type=int, default=8080)
+    serve_parser.add_argument("--log-level", default="info")
+    serve_parser.add_argument("--no-interactive", action="store_true", help=argparse.SUPPRESS)
+    _add_audio_args(serve_parser)
+    serve_parser.set_defaults(handler=_serve_command)
+
+    health_parser = subparsers.add_parser("health", help="Query the Doc Ock health endpoint")
+    health_parser.add_argument("--url", default=None)
+    health_parser.add_argument("--host", default="127.0.0.1")
+    health_parser.add_argument("--port", type=int, default=8080)
+    health_parser.add_argument("--timeout-s", type=float, default=3.0)
+    health_parser.set_defaults(handler=_health_command)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    _load_local_dotenv()
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.handler(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Doc Ock Control</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header>
+  <div class="title">
+    <h1>Doc Ock</h1>
+    <span class="subtitle">LeRobot &middot; Policy Runtime</span>
+  </div>
+  <div class="status-pill" id="statusPill">
+    <span class="dot" id="statusDot"></span>
+    <span id="statusText">connecting...</span>
+  </div>
+</header>
+
+<main>
+  <section class="card">
+    <div class="card-header">
+      <h2>Health</h2>
+      <button class="btn-ghost" id="refreshHealthBtn" title="Refresh">refresh</button>
+    </div>
+    <div class="grid2">
+      <div><label>State</label><span id="healthState">-</span></div>
+      <div><label>Dry run</label><span id="healthDry">-</span></div>
+      <div><label>Model loaded</label><span id="healthModel">-</span></div>
+      <div><label>Voice mode</label><span id="healthVoice">-</span></div>
+      <div><label>Robot</label><span id="healthRobot">-</span></div>
+      <div><label>Teleop</label><span id="healthTeleop">-</span></div>
+      <div class="full"><label>Configured cameras</label><pre id="healthCams">-</pre></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-header">
+      <h2>Voice mode</h2>
+      <div class="row">
+        <kbd>press v</kbd>
+        <kbd>Enter = voice-&gt;action</kbd>
+      </div>
+    </div>
+    <p class="muted">Process-wide state. Toggling does not pause the running session. When audio is enabled, toggling starts/stops the mic.</p>
+    <div class="row">
+      <label class="switch">
+        <input type="checkbox" id="voiceToggle" />
+        <span class="slider"></span>
+      </label>
+      <span id="voiceLabel" class="voice-label">OFF</span>
+    </div>
+    <div class="buttons">
+      <button type="button" class="btn btn-primary" id="voiceActionBtn">Voice -&gt; Action</button>
+    </div>
+    <p class="muted">Test flow: click once, speak, wait for the transcript to auto-commit.</p>
+  </section>
+
+  <section class="card" id="transcriptCard">
+    <div class="card-header">
+      <h2>Transcript</h2>
+      <div class="row">
+        <button type="button" class="btn-ghost" id="commitTranscriptBtn">commit</button>
+        <div class="pill" id="audioPill">audio off</div>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="full">
+        <label>Partial (live)</label>
+        <pre id="partialText" class="transcript partial">-</pre>
+      </div>
+      <div class="full">
+        <label>Last committed -&gt; becomes active task</label>
+        <pre id="committedText" class="transcript committed">-</pre>
+      </div>
+      <div class="full">
+        <label>Audio error</label>
+        <pre id="audioErr">-</pre>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-header">
+      <h2>Session</h2>
+      <div class="pill" id="sessionPill">idle</div>
+    </div>
+
+    <form id="sessionForm" class="form">
+      <div class="form-row">
+        <label for="task">Task</label>
+        <input type="text" id="task" value="grab the arduino box and move it" placeholder="grab the arduino box and move it" required />
+      </div>
+      <div class="form-row">
+        <label for="modelRepoId">Policy repo ID or path</label>
+        <input type="text" id="modelRepoId" value="/home/aup/outputs/act_so101_test/checkpoints/last/pretrained_model" placeholder="/home/aup/outputs/act_so101_test/checkpoints/last/pretrained_model" required />
+      </div>
+      <div class="form-grid">
+        <div class="form-row">
+          <label for="maxSteps">Max steps</label>
+          <input type="number" id="maxSteps" min="1" placeholder="(optional)" />
+        </div>
+        <div class="form-row">
+          <label for="maxDuration">Max duration (s)</label>
+          <input type="number" id="maxDuration" min="0.1" step="0.1" value="60" placeholder="60" />
+        </div>
+      </div>
+
+      <div class="buttons">
+        <button type="submit" class="btn btn-primary" id="startBtn">Start session</button>
+        <button type="button" class="btn btn-danger" id="stopBtn">Stop session</button>
+      </div>
+    </form>
+
+    <div class="grid2 status-grid">
+      <div><label>State</label><span id="sState">-</span></div>
+      <div><label>Step count</label><span id="sStep">-</span></div>
+      <div><label>Task</label><span id="sTask">-</span></div>
+      <div><label>Model</label><span id="sModel">-</span></div>
+      <div><label>Started at</label><span id="sStarted">-</span></div>
+      <div><label>Voice mode</label><span id="sVoice">-</span></div>
+      <div class="full"><label>Last error</label><pre id="sErr">-</pre></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-header">
+      <h2>Activity log</h2>
+      <button class="btn-ghost" id="clearLogBtn">clear</button>
+    </div>
+    <pre id="log" class="log"></pre>
+  </section>
+</main>
+
+<footer>
+  <span>Doc Ock UI v1 &middot; connects to the same origin</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
